@@ -147,7 +147,7 @@ pkg_jobs_keep_files_to_del(struct pkg *p1, struct pkg *p2)
 }
 
 static int
-pkg_jobs_install(struct pkg_jobs *j)
+pkg_jobs_install(struct pkg_jobs *j, bool force)
 {
 	struct pkg *p = NULL;
 	struct pkg *pkg = NULL;
@@ -246,6 +246,8 @@ pkg_jobs_install(struct pkg_jobs *j)
 			}
 		}
 
+		if (force)
+			flags |= PKG_ADD_FORCE;
 		flags |= PKG_ADD_UPGRADE;
 		if (automatic)
 			flags |= PKG_ADD_AUTOMATIC;
@@ -294,7 +296,7 @@ int
 pkg_jobs_apply(struct pkg_jobs *j, int force)
 {
 	if (j->type == PKG_JOBS_INSTALL)
-		return (pkg_jobs_install(j));
+		return (pkg_jobs_install(j, force));
 	if (j->type == PKG_JOBS_DEINSTALL)
 		return (pkg_jobs_deinstall(j, force));
 	if (j->type == PKG_JOBS_FETCH)
@@ -327,7 +329,7 @@ pkg_jobs_fetch(struct pkg_jobs *j)
 	/* check for available size to fetch */
 	while (pkg_jobs(j, &p) == EPKG_OK) {
 		int64_t pkgsize;
-		pkg_get(p, PKG_NEW_PKGSIZE, &pkgsize, PKG_REPOPATH, repopath);
+		pkg_get(p, PKG_NEW_PKGSIZE, &pkgsize, PKG_REPOPATH, &repopath);
 		snprintf(cachedpath, MAXPATHLEN, "%s/%s", cachedir, repopath);
 		if (stat(cachedpath, &st) == -1)
 			dlsize += pkgsize;

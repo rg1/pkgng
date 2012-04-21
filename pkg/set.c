@@ -62,7 +62,6 @@ exec_set(int argc, char **argv)
 	const char *version;
 	char *neworigin = NULL;
 	char *oldorigin = NULL;
-	char *chgoriginstr = NULL;
 	unsigned int loads = PKG_LOAD_BASIC;
 	unsigned int sets = 0;
 
@@ -89,7 +88,6 @@ exec_set(int argc, char **argv)
 			case 'o':
 				sets |= ORIGIN;
 				loads |= PKG_LOAD_DEPS;
-				chgoriginstr = optarg;
 				oldorigin = strdup(optarg);
 				neworigin = strrchr(oldorigin, ':');
 				if (neworigin == NULL) {
@@ -142,7 +140,8 @@ exec_set(int argc, char **argv)
 	}
 	i = 0;
 	do {
-		pkg_config_bool(PKG_CONFIG_ASSUME_ALWAYS_YES, &yes);
+		if (!yes)
+			pkg_config_bool(PKG_CONFIG_ASSUME_ALWAYS_YES, &yes);
 
 		if ((it = pkgdb_query(db, argv[i], match)) == NULL) {
 			if (oldorigin != NULL)
@@ -171,10 +170,14 @@ exec_set(int argc, char **argv)
 				pkg_get(pkg, PKG_NAME, &name, PKG_VERSION, &version);
 				while (pkg_deps(pkg, &d) == EPKG_OK) {
 					if (strcmp(pkg_dep_get(d, PKG_DEP_ORIGIN), oldorigin) == 0) {
-						if (!yes)
-							yes = query_yesno("%s-%s: change %s dependency to %s? [y/N]: ", name, version, oldorigin, neworigin);
-						if (yes)
-							pkgdb_set(db, pkg, PKG_DEP_ORIGIN, chgoriginstr);
+						bool pkg_yes = yes;
+						if (!pkg_yes)
+							pkg_yes = query_yesno("%s-%s: change %s dependency to %s? [y/N]: ", name, version, oldorigin, neworigin);
+						if (pkg_yes) {
+							if (pkgdb_set(db, pkg, PKG_DEP_ORIGIN, oldorigin, neworigin) != EPKG_OK) {
+								return (EPKG_FATAL);
+							}
+						}
 					}
 				}
 			}

@@ -77,6 +77,7 @@ static struct commands {
 	{ "set", "Modify local database informations", exec_set, usage_set},
 	{ "register", "Registers a package into the local package database", exec_register, usage_register},
 	{ "repo", "Creates a package database repository", exec_repo, usage_repo},
+	{ "rquery", "Query information from the remote repository", exec_rquery, usage_rquery},
 	{ "shell", "Open a debug shell", exec_shell, usage_shell},
 	{ "shlib", "Displays which package links against a specific shared library", exec_shlib, usage_shlib},
 	{ "update", "Updates remote package repository databases", exec_update, usage_update},
@@ -249,7 +250,7 @@ main(int argc, char **argv)
 			pkg_config_bool(PKG_CONFIG_SHLIBS, &b);
 			printf("Track shlibs: %s\n", b ? "yes" : "no");
 			pkg_config_bool(PKG_CONFIG_AUTODEPS, &b);
-			printf("Automatic depdency tracking: %s\n", b ? "yes": "no");
+			printf("Automatic dependency tracking: %s\n", b ? "yes": "no");
 			pkg_config_string(PKG_CONFIG_PLIST_KEYWORDS_DIR, &buf);
 			printf("Custom keywords directory: %s\n", buf ? buf : "none");
 		}
