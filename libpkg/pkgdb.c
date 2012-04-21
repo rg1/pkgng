@@ -404,13 +404,18 @@ pkgdb_init(sqlite3 *sdb)
 		"value TEXT,"
 		"PRIMARY KEY (package_id,option)"
 	");"
-	"CREATE TABLE deps ("
-		"origin TEXT NOT NULL,"
+	"CREATE TABLE depends ("
+		"id INTEGER PRIMARY KEY,"
+		"origin TEXT NOT NULL UNIQUE,"
 		"name TEXT NOT NULL,"
 		"version TEXT NOT NULL,"
+	");"
+	"CREATE TABLE pkg_depends ("
 		"package_id INTEGER REFERENCES packages(id) ON DELETE CASCADE"
 			" ON UPDATE CASCADE,"
-		"PRIMARY KEY (package_id,origin)"
+		"depend_id INTEGER REFERENCES depends(id) ON DELETE RESTRICT"
+			" ON UPDATE RESTRICT,"
+		"PRIMARY KEY (package_id, depends_id)"
 	");"
 	"CREATE TABLE files ("
 		"path TEXT PRIMARY KEY,"
@@ -488,8 +493,7 @@ pkgdb_init(sqlite3 *sdb)
 
 	/* Mark the end of the array */
 
-	"CREATE INDEX deporigini on deps(origin);"
-	"PRAGMA user_version = 11;"
+	"PRAGMA user_version = 12;"
 	"COMMIT;"
 	;
 
@@ -961,17 +965,17 @@ pkgdb_load_deps(struct pkgdb *db, struct pkg *pkg)
 	const char *reponame = NULL;
 	const char *basesql = "" 
 			"SELECT d.name, d.origin, d.version "
-			"FROM '%s'.deps AS d "
-			"WHERE d.package_id = ?1;";
+			"FROM '%s'.depends AS d, '%s'.pkg_depends AS pd "
+			"WHERE pd.package_id = ?1 AND d.id = pd.depend_id;";
 
 	assert(db != NULL && pkg != NULL);
 
 	pkg_get(pkg, PKG_REPONAME, &reponame);
 
 	if (pkg->type == PKG_REMOTE)
-		snprintf(sql, sizeof(sql), basesql, reponame);
+		snprintf(sql, sizeof(sql), basesql, reponame, reponame);
 	else
-		snprintf(sql, sizeof(sql), basesql, "main");
+		snprintf(sql, sizeof(sql), basesql, "main", "main");
 
 	if (pkg->flags & PKG_LOAD_DEPS)
 		return (EPKG_OK);
@@ -1007,9 +1011,10 @@ pkgdb_load_rdeps(struct pkgdb *db, struct pkg *pkg)
 	const char *origin;
 	const char sql[] = ""
 		"SELECT p.name, p.origin, p.version "
-		"FROM packages AS p, deps AS d "
-		"WHERE p.id = d.package_id "
-			"AND d.origin = ?1;";
+		"FROM packages AS p, depends AS d, pkg_depends AS pd "
+		"WHERE d.origin = ?1 "
+			"AND pd.depend_id = d.id "
+			"AND p.id = pd.package_id;";
 
 	assert(db != NULL && pkg != NULL);
 	assert(pkg->type == PKG_INSTALLED);
@@ -1380,8 +1385,11 @@ pkgdb_register_pkg(struct pkgdb *db, struct pkg *pkg, int complete)
 		"VALUES( ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, "
 		"(SELECT id from mtree where content = ?14), ?15, now());";
 	const char sql_dep[] = ""
-		"INSERT OR ROLLBACK INTO deps (origin, name, version, package_id) "
-		"VALUES (?1, ?2, ?3, ?4);";
+		"INSERT OR IGNORE INTO depends (origin, name, version) "
+		"VALUES (?1, ?2, ?3);";
+	const char sql_adddep[] = ""
+		"INSERT OR ROLLBACK INTO pkg_depends(package_id, depend_id) "
+		"VALUES (?1, (SELECT id FROM depends WHERE origin = ?2));";
 	const char sql_file[] = ""
 		"INSERT OR ROLLBACK INTO files (path, sha256, package_id) "
 		"VALUES (?1, ?2, ?3);";
@@ -1416,7 +1424,7 @@ pkgdb_register_pkg(struct pkgdb *db, struct pkg *pkg, int complete)
 		"INSERT OR ROLLBACK INTO pkg_shlibs(package_id, shlib_id) "
 		"VALUES (?1, (SELECT id FROM shlibs WHERE name = ?2))";
 	const char sql_deps_update[] = ""
-		"UPDATE deps SET NAME=?1 , VERSION=?2 WHERE ORIGIN=?3;";
+		"UPDATE depends SET NAME=?1, VERSION=?2 WHERE ORIGIN=?3;";
 
 	const char *mtree, *origin, *name, *version, *name2, *version2;
 	const char *comment, *desc, *message, *infos;
@@ -1514,21 +1522,35 @@ pkgdb_register_pkg(struct pkgdb *db, struct pkg *pkg, int complete)
 		ERROR_SQLITE(s);
 		goto cleanup;
 	}
+	if (sqlite3_prepare_v2(s, sql_adddep, -1, &stmt2, NULL) != SQLITE_OK) {
+		ERROR_SQLITE(s);
+		goto cleanup;
+	}
 
 	while (pkg_deps(pkg, &dep) == EPKG_OK) {
 		sqlite3_bind_text(stmt, 1, pkg_dep_get(dep, PKG_DEP_ORIGIN), -1, SQLITE_STATIC);
 		sqlite3_bind_text(stmt, 2, pkg_dep_get(dep, PKG_DEP_NAME), -1, SQLITE_STATIC);
 		sqlite3_bind_text(stmt, 3, pkg_dep_get(dep, PKG_DEP_VERSION), -1, SQLITE_STATIC);
-		sqlite3_bind_int64(stmt, 4, package_id);
 
 		if ((ret = sqlite3_step(stmt)) != SQLITE_DONE) {
 			ERROR_SQLITE(s);
 			goto cleanup;
 		}
 		sqlite3_reset(stmt);
+
+		sqlite3_bind_int64(stmt2, 1, package_id);
+		sqlite3_bind_text(stmt2, 2, pkg_dep_get(dep, PKG_DEP_ORIGIN), -1, SQLITE_STATIC);
+
+		if ((ret = sqlite3_step(stmt2)) != SQLITE_DONE) {
+			ERROR_SQLITE(s);
+			goto cleanup;
+		}
+		sqlite3_reset(stmt2);
 	}
 	sqlite3_finalize(stmt);
+	sqlite3_finalize(stmt2);
 	stmt = NULL;
+	stmt2 = NULL;
 
 	/*
 	 * Insert files.
@@ -2269,10 +2291,12 @@ pkgdb_query_installs(struct pkgdb *db, match_t match, int nbpkgs, char **pkgs, c
 				"r.arch, r.maintainer, r.www, r.prefix, r.flatsize, r.pkgsize, "
 				"r.cksum, r.path, 1 "
 				"FROM '%s'.packages AS r where r.origin IN "
-				"(SELECT d.origin FROM '%s'.deps AS d, pkgjobs AS j WHERE d.package_id = j.pkgid) "
+				"(SELECT d.origin FROM '%s'.depends AS d, '%s'.pkg_depends AS pd, pkgjobs AS j "
+					"WHERE pd.package_id = j.pkgid "
+					"AND d.id = pd.depend_id)"
 				"AND (SELECT origin FROM main.packages WHERE origin=r.origin AND version=r.version) IS NULL;";
 
-	const char weight_sql[] = "UPDATE pkgjobs set weight=(select count(*) from '%s'.deps as d where d.origin=pkgjobs.origin)";
+	const char weight_sql[] = "UPDATE pkgjobs set weight=(select count(*) from '%s'.depends as d where d.origin=pkgjobs.origin)";
 
 	assert(db != NULL);
 
@@ -2353,7 +2377,7 @@ pkgdb_query_installs(struct pkgdb *db, match_t match, int nbpkgs, char **pkgs, c
 
 	/* Append dependencies */
 	sbuf_reset(sql);
-	sbuf_printf(sql, deps_sql, reponame, reponame);
+	sbuf_printf(sql, deps_sql, reponame, reponame, reponame);
 	sbuf_finish(sql);
 
 	do {
@@ -2434,7 +2458,9 @@ pkgdb_query_upgrades(struct pkgdb *db, const char *repo, bool all)
 				"r.arch, r.maintainer, r.www, r.prefix, r.flatsize, r.pkgsize, "
 				"r.cksum, r.path, 1 "
 				"FROM '%s'.packages AS r where r.origin IN "
-				"(SELECT d.origin from '%s'.deps AS d, pkgjobs as j WHERE d.package_id = j.pkgid) "
+				"(SELECT d.origin from '%s'.depends AS d, '%s'.pkg_depends AS pd, pkgjobs as j "
+					"WHERE pd.package_id = j.pkgid "
+					"AND d.id = pd.depend_id) "
 				"AND (SELECT p.origin from main.packages as p WHERE p.origin=r.origin AND version=r.version) IS NULL;";
 
 	const char *pkgjobs_sql_3;
@@ -2457,7 +2483,7 @@ pkgdb_query_upgrades(struct pkgdb *db, const char *repo, bool all)
 			"FROM main.packages AS l, pkgjobs AS r WHERE l.origin = r.origin";
 	}
 
-	const char weight_sql[] = "UPDATE pkgjobs set weight=(select count(*) from '%s'.deps as d where d.origin=pkgjobs.origin)";
+	const char weight_sql[] = "UPDATE pkgjobs set weight=(select count(*) from '%s'.depends as d where d.origin=pkgjobs.origin)";
 
 	/* Working on multiple repositories */
 	pkg_config_bool(PKG_CONFIG_MULTIREPOS, &multirepos_enabled);
@@ -2490,7 +2516,7 @@ pkgdb_query_upgrades(struct pkgdb *db, const char *repo, bool all)
 		sql_exec(db->sqlite, "DELETE from pkgjobs where (select p.origin from main.packages as p where p.origin=pkgjobs.origin and version=pkgjobs.version) IS NOT NULL;");
 
 	sbuf_reset(sql);
-	sbuf_printf(sql, pkgjobs_sql_2, reponame, reponame);
+	sbuf_printf(sql, pkgjobs_sql_2, reponame, reponame, reponame);
 	sbuf_finish(sql);
 
 	do {
@@ -2597,10 +2623,9 @@ pkgdb_query_autoremove(struct pkgdb *db)
 
 	do {
 		sql_exec(db->sqlite, "INSERT OR IGNORE into autoremove(origin, pkgid, weight) "
-				"SELECT distinct origin, id, %d FROM packages WHERE automatic=1 AND "
-				"origin NOT IN (SELECT DISTINCT deps.origin FROM deps WHERE "
-				" deps.origin = packages.origin AND package_id NOT IN "
-				" (select pkgid from autoremove));"
+				"SELECT DISTINCT origin, id, %d FROM packages AS p WHERE automatic=1 "
+					"AND (SELECT id FROM pkg_depends WHERE package_id = p.id) IS NULL "
+					"AND (SELECT pkgid FROM pkgjobs WHERE pkgid = p.id) IS NULL;"
 				, weight);
 	} while (sqlite3_changes(db->sqlite) != 0);
 
@@ -2626,7 +2651,7 @@ pkgdb_query_delete(struct pkgdb *db, match_t match, int nbpkgs, char **pkgs, int
 	const char sqlsel[] = ""
 		"SELECT id, p.origin, name, version, comment, desc, "
 		"message, arch, maintainer, www, prefix, "
-		"flatsize, (select count(*) from deps AS d where d.origin=del.origin) as weight FROM packages as p, delete_job as del where id = pkgid "
+		"flatsize, (select count(*) from depends AS d where d.origin=del.origin) as weight FROM packages as p, delete_job as del where id = pkgid "
 		"ORDER BY weight ASC;";
 
 	sbuf_cat(sql, "INSERT OR IGNORE INTO delete_job (origin, pkgid) "
@@ -2687,7 +2712,7 @@ pkgdb_query_delete(struct pkgdb *db, match_t match, int nbpkgs, char **pkgs, int
 	if (recursive) {
 		do {
 			sql_exec(db->sqlite, "INSERT OR IGNORE INTO delete_job(origin, pkgid) "
-					"SELECT p.origin, p.id FROM deps AS d, packages AS p, delete_job AS del WHERE "
+					"SELECT p.origin, p.id FROM depends AS d, packages AS p, delete_job AS del WHERE "
 					"d.origin=del.origin AND p.id = d.package_id");
 		} while (sqlite3_changes(db->sqlite) != 0);
 	}
@@ -3032,7 +3057,7 @@ pkgdb_vset(struct pkgdb *db, int64_t id, va_list ap)
 					pkg_emit_error("Wrong origin format expecting oldorigin:neworigin");
 					return (EPKG_FATAL);
 				}
-				sqlite3_snprintf(BUFSIZ, sql, "update deps set origin='%q', "
+				sqlite3_snprintf(BUFSIZ, sql, "update depends set origin='%q', "
 				    "name=(select name from packages where origin='%q'), "
 				    "version=(select version from packages where origin='%q') "
 				    "WHERE package_id=%d AND origin='%q';",

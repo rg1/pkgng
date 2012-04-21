@@ -251,8 +251,9 @@ pkg_create_repo(char *path, void (progress)(struct pkg *pkg, void *data), void *
 	char *ext = NULL;
 
 	sqlite3 *sqlite = NULL;
-	sqlite3_stmt *stmt_deps = NULL;
 	sqlite3_stmt *stmt_pkg = NULL;
+	sqlite3_stmt *stmt_deps = NULL;
+	sqlite3_stmt *stmt_adddeps = NULL;
 	sqlite3_stmt *stmt_lic1 = NULL;
 	sqlite3_stmt *stmt_lic2 = NULL;
 	sqlite3_stmt *stmt_cat1 = NULL;
@@ -296,12 +297,16 @@ pkg_create_repo(char *path, void (progress)(struct pkg *pkg, void *data), void *
 			"path TEXT NOT NULL," /* relative path to the package in the repository */
 			"pkg_format_version INTEGER"
 		");"
-		"CREATE TABLE deps ("
-			"origin TEXT,"
+		"CREATE TABLE depends ("
+			"id INTEGER PRIMARY KEY,"
+			"origin TEXT NOT NULL UNIQUE,"
 			"name TEXT,"
-			"version TEXT,"
-			"package_id INTEGER REFERENCES packages(id),"
-			"UNIQUE(package_id, origin)"
+			"version TEXT"
+		");"
+		"CREATE TABLE pkg_depends ("
+			"package_id INTEGER REFERENCES packages(id), "
+			"depend_id INTEGER REFERENCES depends(id), "
+			"PRIMARY KEY(package_id, depend_id)"
 		");"
 		"CREATE TABLE categories ("
 			"id INTEGER PRIMARY KEY, "
@@ -345,8 +350,10 @@ pkg_create_repo(char *path, void (progress)(struct pkg *pkg, void *data), void *
 		")"
 		"VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);";
 	const char depssql[] = ""
-		"INSERT INTO deps (origin, name, version, package_id) "
-		"VALUES (?1, ?2, ?3, ?4);";
+		"INSERT OR IGNORE INTO depends (origin, name, version) "
+		"VALUES (?1, ?2, ?3);";
+	const char adddeps[] = "INSERT OR ROLLBACK INTO pkg_depends(package_id, depend_id) "
+		"VALUES (?1, (SELECT id FROM depends WHERE origin = ?2));";
 	const char licsql[] = "INSERT OR IGNORE INTO licenses(name) VALUES(?1);";
 	const char addlicsql[] = "INSERT OR ROLLBACK INTO pkg_licenses(package_id, license_id) "
 		"VALUES (?1, (SELECT id FROM licenses WHERE name = ?2));";
@@ -423,6 +430,12 @@ pkg_create_repo(char *path, void (progress)(struct pkg *pkg, void *data), void *
 	}
 
 	if (sqlite3_prepare_v2(sqlite, depssql, -1, &stmt_deps, NULL) != SQLITE_OK) {
+		ERROR_SQLITE(sqlite);
+		retcode = EPKG_FATAL;
+		goto cleanup;
+	}
+
+	if (sqlite3_prepare_v2(sqlite, adddeps, -1, &stmt_adddeps, NULL) != SQLITE_OK) {
 		ERROR_SQLITE(sqlite);
 		retcode = EPKG_FATAL;
 		goto cleanup;
@@ -585,7 +598,6 @@ pkg_create_repo(char *path, void (progress)(struct pkg *pkg, void *data), void *
 			sqlite3_bind_text(stmt_deps, 1, pkg_dep_get(dep, PKG_DEP_ORIGIN), -1, SQLITE_STATIC);
 			sqlite3_bind_text(stmt_deps, 2, pkg_dep_get(dep, PKG_DEP_NAME), -1, SQLITE_STATIC);
 			sqlite3_bind_text(stmt_deps, 3, pkg_dep_get(dep, PKG_DEP_VERSION), -1, SQLITE_STATIC);
-			sqlite3_bind_int64(stmt_deps, 4, package_id);
 
 			if (sqlite3_step(stmt_deps) != SQLITE_DONE) {
 				ERROR_SQLITE(sqlite);
@@ -593,6 +605,16 @@ pkg_create_repo(char *path, void (progress)(struct pkg *pkg, void *data), void *
 				goto cleanup;
 			}
 			sqlite3_reset(stmt_deps);
+
+			sqlite3_bind_int64(stmt_adddeps, 1, package_id);
+			sqlite3_bind_text(stmt_adddeps, 2, pkg_dep_get(dep, PKG_DEP_ORIGIN), -1, SQLITE_STATIC);
+
+			if (sqlite3_step(stmt_adddeps) != SQLITE_DONE) {
+				ERROR_SQLITE(sqlite);
+				retcode = EPKG_FATAL;
+				goto cleanup;
+			}
+			sqlite3_reset(stmt_adddeps);
 		}
 
 		category = NULL;
@@ -689,6 +711,9 @@ pkg_create_repo(char *path, void (progress)(struct pkg *pkg, void *data), void *
 
 	if (stmt_deps != NULL)
 		sqlite3_finalize(stmt_deps);
+
+	if (stmt_adddeps != NULL)
+		sqlite3_finalize(stmt_adddeps);
 
 	if (stmt_cat1 != NULL)
 		sqlite3_finalize(stmt_cat1);
