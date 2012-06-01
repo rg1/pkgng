@@ -387,10 +387,6 @@ format_sql_condition(const char *str, struct sbuf *sqlcond)
 	type_t state = NONE;
 	sbuf_cat(sqlcond, " WHERE ");
 	while (str[0] != '\0') {
-		if (str[0] == ';') {
-			fprintf(stderr, "';' is forbidden in evaluation format");
-			return (EPKG_FATAL);
-		}
 		if (state == NONE) {
 			if (str[0] == '%') {
 				str++;
@@ -447,9 +443,10 @@ format_sql_condition(const char *str, struct sbuf *sqlcond)
 				switch (str[0]) {
 					case '(':
 					case ')':
+						sbuf_putc(sqlcond, str[0]);
+						break;
 					case ' ':
 					case '\t':
-						sbuf_putc(sqlcond, str[0]);
 						break;
 					case '|':
 						if (str[1] == '|') {
@@ -471,7 +468,7 @@ format_sql_condition(const char *str, struct sbuf *sqlcond)
 		} else if (state == OPERATOR_STRING || state == OPERATOR_INT) {
 			/* only operators or space are allowed here */
 			if (isspace(str[0])) {
-				sbuf_putc(sqlcond, str[0]);
+				/* do nothing */
 			} else if (str[0] == '~' ) {
 				if (state != OPERATOR_STRING) {
 					fprintf(stderr, "~ expected only for string testing");
@@ -514,10 +511,13 @@ format_sql_condition(const char *str, struct sbuf *sqlcond)
 				sbuf_putc(sqlcond, str[0]);
 				str++;
 				sbuf_putc(sqlcond, str[0]);
+			} else {
+				fprintf(stderr, "an operator is expected, got %c\n", str[0]);
+				return (EPKG_FATAL);
 			}
 		} else if (state == NEXT_IS_STRING || state == NEXT_IS_INT) {
 			if (isspace(str[0])) {
-				sbuf_putc(sqlcond, str[0]);
+				/* do nothing */
 			} else {
 				if (state == NEXT_IS_STRING) {
 					if (str[0] == '"') {
@@ -525,10 +525,10 @@ format_sql_condition(const char *str, struct sbuf *sqlcond)
 					} else if (str[0] == '\'') {
 						state = SQUOTEDSTRING;
 					} else {
-						sbuf_putc(sqlcond, '"');
 						state = STRING;
+						str--;
 					}
-					sbuf_putc(sqlcond, str[0]);
+					sbuf_putc(sqlcond, '\'');
 				} else {
 					if (!isnumber(str[0])) {
 						fprintf(stderr, "a number is expected got %c\n", str[0]);
@@ -544,27 +544,29 @@ format_sql_condition(const char *str, struct sbuf *sqlcond)
 			} else if (!isnumber(str[0])) {
 				fprintf(stderr, "a number is expected %c\n", str[0]);
 				return (EPKG_FATAL);
+			} else {
+				sbuf_putc(sqlcond, str[0]);
 			}
-			sbuf_putc(sqlcond, str[0]);
-		} else if ( state == STRING ) {
-			if (isspace(str[0])) {
-				sbuf_putc(sqlcond, '"');
+		} else if (state == STRING || state == QUOTEDSTRING || state == SQUOTEDSTRING) {
+			if ((state == STRING && isspace(str[0])) ||
+			    (state == QUOTEDSTRING && str[0] == '"') ||
+			    (state == SQUOTEDSTRING && str[0] == '\'')) {
+				sbuf_putc(sqlcond, '\'');
 				state = NONE;
+			} else {
+				sbuf_putc(sqlcond, str[0]);
+				if (str[0] == '\'')
+					sbuf_putc(sqlcond, str[0]);
 			}
-			sbuf_putc(sqlcond, str[0]);
-		} else if (state == QUOTEDSTRING) {
-			if (str[0] == '"')
-				state = NONE;
-			sbuf_putc(sqlcond, str[0]);
-		} else if (state == SQUOTEDSTRING) {
-			if (str[0] == '"')
-				state = NONE;
-			sbuf_putc(sqlcond, str[0]);
 		}
 		str++;
 	}
 	if (state == STRING)
-		sbuf_putc(sqlcond, '"');
+		sbuf_putc(sqlcond, '\'');
+	else if (state != NONE && state != INT) {
+		fprintf(stderr, "unexpected end of expression\n");
+		return (EPKG_FATAL);
+	}
 
 	return (EPKG_OK);
 }
